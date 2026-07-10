@@ -189,10 +189,10 @@ class PVProfile(GenerationProfile):
             params['endyear'] = PVGIS_MAX_YEAR
 
         data = self._request_cached(params)
-        series = self._parse_response(data)
+        series = self._parse_response(data).resample('1h').sum()  # sicherstellen, dass Daten zur vollen Stunde vorliegen (PVGIS liefert manchmal offset)
         self._metadata = data.get("meta", {})
         return series
-
+    
     @property
     def metadata(self) -> dict:
         """PVGIS metadata dict (populated after :meth:`fetch`)."""
