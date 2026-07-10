@@ -9,6 +9,7 @@ Starten:
     streamlit run app.py
 """
 
+import io
 import os
 import tempfile
 
@@ -35,6 +36,27 @@ COLOR = {
     'recommend': '#008300',         # gruen
 }
 
+# Zeitliche Aggregation für die Profil-Vorschau (Pandas-Resample-Regel;
+# ``None`` = Rohdaten ohne Resampling).
+_PROFILE_FREQ = {
+    "Monatssumme": "MS",
+    "Wochensumme": "W",
+    "Tagessumme": "D",
+    "Stundenwerte": "h",
+    "Rohdaten (15 min)": None,
+}
+
+# Deutsche Spaltennamen für den Zeitreihen-Export.
+_EXPORT_COLS = {
+    'generation': 'Erzeugung [kWh]',
+    'load': 'Last [kWh]',
+    'grid_import': 'Netzbezug [kWh]',
+    'grid_export': 'Netzeinspeisung [kWh]',
+    'charge': 'Speicher Ladung [kWh]',
+    'discharge': 'Speicher Entladung [kWh]',
+    'soc': 'Speicherfuellstand [kWh]',
+}
+
 st.set_page_config(
     page_title="EEG Speicher-Tool",
     page_icon="🔋",
@@ -58,6 +80,29 @@ def _fmt_kwh(value: float) -> str:
     if abs(value) >= 10_000:
         return f"{value / 1_000:.1f} MWh"
     return f"{value:,.0f} kWh"
+
+
+def _export_frame(result: pd.DataFrame) -> pd.DataFrame:
+    """Rename simulation columns to German labels for export."""
+    out = result.rename(columns=_EXPORT_COLS)
+    out.index.name = 'Zeitpunkt'
+    return out
+
+
+def _to_excel(result: pd.DataFrame) -> bytes:
+    """Serialise a simulation time series to an XLSX byte string.
+
+    Args:
+        result (pd.DataFrame): Output of
+            :func:`core.simulate_storage`.
+
+    Returns:
+        bytes: In-memory XLSX file content.
+    """
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        _export_frame(result).to_excel(writer, sheet_name='Zeitreihe')
+    return buffer.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +159,61 @@ def _cached_sweep(generation: pd.Series, load: pd.Series,
 # ---------------------------------------------------------------------------
 # Diagramme
 # ---------------------------------------------------------------------------
+
+def _profile_fig(generation: pd.Series, load: pd.Series,
+                 freq_label: str) -> go.Figure:
+    """Time series of generation and load at a chosen aggregation.
+
+    Args:
+        generation (pd.Series): Generation [kWh per timestep].
+        load (pd.Series): Load [kWh per timestep].
+        freq_label (str): Key of :data:`_PROFILE_FREQ`.
+
+    Returns:
+        go.Figure: Plotly line chart.
+    """
+    freq = _PROFILE_FREQ[freq_label]
+    if freq is None:
+        gen_plot, load_plot = generation, load
+        y_title = 'Energie je Zeitschritt [kWh]'
+    else:
+        gen_plot = generation.resample(freq).sum()
+        load_plot = load.resample(freq).sum()
+        y_title = 'Energie je Periode [kWh]'
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=gen_plot.index, y=gen_plot.values, name='Erzeugung',
+        line=dict(color=COLOR['generation'], width=2),
+        hovertemplate='%{y:.0f} kWh<extra>Erzeugung</extra>',
+    ))
+    fig.add_trace(go.Scatter(
+        x=load_plot.index, y=load_plot.values, name='Last',
+        line=dict(color=COLOR['load'], width=2),
+        hovertemplate='%{y:.0f} kWh<extra>Last</extra>',
+    ))
+    fig.update_layout(
+        yaxis_title=y_title,
+        legend=dict(orientation='h', y=-0.2),
+        height=380, hovermode='x unified', margin=dict(t=30),
+    )
+    return fig
+
+
+def _profile_section(generation: pd.Series, load: pd.Series) -> None:
+    """Expander to verify the input profiles as a time-series plot."""
+    with st.expander("🔍 Datengrundlage prüfen"):
+        freq_label = st.selectbox(
+            "Zeitliche Auflösung", list(_PROFILE_FREQ), index=2,
+        )
+        st.plotly_chart(
+            _profile_fig(generation, load, freq_label),
+            use_container_width=True,
+        )
+        cols = st.columns(2)
+        cols[0].metric("Erzeugung gesamt", _fmt_kwh(generation.sum()))
+        cols[1].metric("Verbrauch gesamt", _fmt_kwh(load.sum()))
+
 
 def _sweep_fig(sweep: pd.DataFrame, targets: dict,
                best_capacity: float) -> go.Figure:
@@ -442,22 +542,42 @@ def _step_result(generation: pd.Series, load: pd.Series,
         use_container_width=True,
     )
 
+    # Zeitreihe des empfohlenen (bzw. größten) Szenarios – einmal
+    # simulieren und für Detailgrafik und Download wiederverwenden.
+    cap = best_capacity if pd.notna(best_capacity) \
+        else sweep['capacity_kwh'].iloc[-1]
+    result = simulate_storage(
+        generation, load, cap,
+        StorageParams(c_rate=c_rate, roundtrip_eff=roundtrip_eff),
+    )
+
     with st.expander("📈 Beispielwoche im Detail"):
-        cap = best_capacity if pd.notna(best_capacity) \
-            else sweep['capacity_kwh'].iloc[-1]
-        result = simulate_storage(
-            generation, load, cap,
-            StorageParams(c_rate=c_rate,
-                          roundtrip_eff=roundtrip_eff),
-        )
         st.caption(f"Simulation mit {cap:.0f} kWh Speicher")
         st.plotly_chart(
             _week_fig(result, timestep_hours(load.index)),
             use_container_width=True,
         )
 
-    st.download_button(
-        "⬇️ Alle simulierten Szenarien (CSV)",
+    st.subheader("Downloads")
+    st.caption(
+        f"Zeitreihe des empfohlenen Szenarios ({cap:.0f} kWh) sowie "
+        f"die Kennzahlen aller simulierten Speichergrößen."
+    )
+    tag = f"{cap:.0f}kWh"
+    ts_csv = _export_frame(result).to_csv().encode('utf-8')
+    cols = st.columns(3)
+    cols[0].download_button(
+        "⬇️ Zeitreihe (CSV)", ts_csv,
+        f"speicher_{tag}_zeitreihe.csv", "text/csv",
+    )
+    cols[1].download_button(
+        "⬇️ Zeitreihe (Excel)", _to_excel(result),
+        f"speicher_{tag}_zeitreihe.xlsx",
+        "application/vnd.openxmlformats-officedocument."
+        "spreadsheetml.sheet",
+    )
+    cols[2].download_button(
+        "⬇️ Alle Szenarien (CSV)",
         sweep.to_csv(index=False).encode('utf-8'),
         "speicher_szenarien.csv", "text/csv",
     )
@@ -479,6 +599,7 @@ def main() -> None:
     generation, load = _step_data()
     if generation is None or load is None:
         return
+    _profile_section(generation, load)
 
     targets, gen_scale, capacities, params = _step_targets()
     _step_result(generation, load, targets, gen_scale, capacities,
