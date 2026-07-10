@@ -47,6 +47,28 @@ unterschiedlichen Speichergrößen simuliert werden. Als zweite
 Optimierungs-variable kommt der Ausbau der Erzeugung hinzu (beschränkt auf 
 PV-Ausbau).
 
+Es soll verschiedene Optimierungs-targets geben.
+* Autarkie: Netzbezug (in kWh), Schwellenwert
+* Autarkie: Zeitschritte ohne Netzbezug (in %), Schwellenwert
+* Eigenverbrauch: (in %), Schwellenwert.
+
 # User Interface
 Es soll mit Streamlit ein User Interface erstellt werden, wobei vor allem die 
 Optimierung im Fordergrund stehen soll.
+
+# Python Environment
+Nutze das **`hydrology_env`** conda environment für dieses Projekt. Do NOT use the 
+bare `python` command — it resolves to the Microsoft Store stub and fails.
+
+Interpreter path:
+
+    C:\Users\paul.toechterle\.conda\envs\hydrology_env\python.exe
+
+Run a script:
+
+    & C:\Users\paul.toechterle\.conda\envs\hydrology_env\python.exe path\to\script.py
+
+Frühre ein `requirements.txt` file um zu tracken, was du alles für packages 
+brauchst.
+
+---
