@@ -46,6 +46,16 @@ _PROFILE_FREQ = {
     "Rohdaten (15 min)": None,
 }
 
+# Kennzahlen der Gegenüberstellung ohne/mit Speicher:
+# (Label, Sweep-Spalte, Typ, kleiner_ist_besser).
+_COMPARE_KPIS = [
+    ("Autarkiegrad", 'autarky', 'pct', False),
+    ("Eigenverbrauchsquote", 'self_consumption', 'pct', False),
+    ("Zeit ohne Netzbezug", 'import_free_share', 'pct', False),
+    ("Netzbezug", 'grid_import_kwh', 'kwh', True),
+    ("Netzeinspeisung", 'grid_export_kwh', 'kwh', True),
+]
+
 # Deutsche Spaltennamen für den Zeitreihen-Export.
 _EXPORT_COLS = {
     'generation': 'Erzeugung [kWh]',
@@ -80,6 +90,41 @@ def _fmt_kwh(value: float) -> str:
     if abs(value) >= 10_000:
         return f"{value / 1_000:.1f} MWh"
     return f"{value:,.0f} kWh"
+
+
+def _kpi_value(row, col: str, kind: str) -> str:
+    """Format a single KPI value for the comparison table.
+
+    Args:
+        row: Sweep row (pd.Series or dict) with KPI columns.
+        col (str): KPI column name.
+        kind (str): ``'pct'`` for a 0-1 ratio or ``'kwh'`` for an
+            energy amount.
+
+    Returns:
+        str: Formatted value.
+    """
+    return _fmt_pct(row[col]) if kind == 'pct' else _fmt_kwh(row[col])
+
+
+def _kpi_delta(base, scenario, col: str, kind: str) -> str:
+    """Format the change of a KPI as a signed delta string.
+
+    Args:
+        base: Baseline sweep row (ohne Speicher).
+        scenario: Scenario sweep row (mit Speicher).
+        col (str): KPI column name.
+        kind (str): ``'pct'`` or ``'kwh'`` (see :func:`_kpi_value`).
+
+    Returns:
+        str: Signed delta, e.g. ``+19.5 %-Pkt.`` or ``-40.0 MWh``.
+    """
+    if kind == 'pct':
+        return f"{(scenario[col] - base[col]) * 100:+.1f} %-Pkt."
+    diff = scenario[col] - base[col]
+    # _fmt_kwh behält das Vorzeichen; Streamlit färbt daraus das
+    # Delta (mit ``inverse`` ist eine Abnahme die Verbesserung).
+    return _fmt_kwh(diff)
 
 
 def _export_frame(result: pd.DataFrame) -> pd.DataFrame:
@@ -329,7 +374,7 @@ def _step_data() -> tuple:
 
     source = st.radio(
         "Woher kommen Last und Erzeugung?",
-        ["Messdaten (CSV)", "Synthetische Profile"],
+        ["Synthetische Profile", "Messdaten (CSV)"],
         horizontal=True,
     )
 
@@ -394,7 +439,6 @@ def _step_data() -> tuple:
     # Gesamtlieferung = Einspeisung (Erzeugungsüberschuss).
     return df['lief_ges'], df['bez_ges']
 
-
 # ---------------------------------------------------------------------------
 # Schritt 2 – Ziele
 # ---------------------------------------------------------------------------
@@ -408,29 +452,46 @@ def _step_targets() -> tuple:
     """
     st.header("2️⃣ Ziele festlegen")
 
-    targets = {}
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.checkbox("Autarkiegrad", value=True,
-                       help="Anteil des Verbrauchs, der ohne "
-                            "Netzbezug gedeckt wird."):
-            targets['autarky'] = st.slider(
-                "Ziel Autarkiegrad [%]", 5, 100, 50, 5,
-            ) / 100.0
-    with col2:
-        if st.checkbox("Eigenverbrauchsquote",
-                       help="Anteil der Erzeugung, der in der "
-                            "Gemeinschaft genutzt wird."):
-            targets['self_consumption'] = st.slider(
-                "Ziel Eigenverbrauch [%]", 5, 100, 70, 5,
-            ) / 100.0
-    with col3:
-        if st.checkbox("Zeit ohne Netzbezug",
-                       help="Anteil der Zeitschritte ganz ohne "
-                            "Netzbezug."):
-            targets['import_free_share'] = st.slider(
-                "Ziel Zeit ohne Netzbezug [%]", 5, 100, 50, 5,
-            ) / 100.0
+    # Nur ein Ziel gleichzeitig, damit die Optimierung eindeutig
+    # bleibt. Pro Option: (KPI-Spalte, Slider-Label, Default, Hilfe).
+    target_options = {
+        "Autarkiegrad": (
+            'autarky', "Ziel Autarkiegrad [%]", 50,
+            "Anteil des Verbrauchs, der über den gesamten Zeitraum "
+            "aus eigener Erzeugung und Speicher gedeckt wird – "
+            "energiemengenbezogen (kWh). 100 % bedeutet: es wird "
+            "kein Strom mehr aus dem Netz bezogen. Ein größerer "
+            "Speicher hebt vor allem diesen Wert, weil "
+            "Erzeugungsüberschüsse für Verbrauchsspitzen ohne "
+            "Erzeugung zwischengespeichert werden.",
+        ),
+        "Eigenverbrauchsquote": (
+            'self_consumption', "Ziel Eigenverbrauch [%]", 70,
+            "Anteil der erzeugten Energie, der in der Gemeinschaft "
+            "selbst genutzt statt ins Netz eingespeist wird "
+            "(kWh-bezogen). 100 % bedeutet: keine Einspeisung von "
+            "Überschüssen. Relevant vor allem bei viel PV – der "
+            "Speicher nimmt Mittagsspitzen auf, die sonst "
+            "eingespeist würden.",
+        ),
+        "Zeit ohne Netzbezug": (
+            'import_free_share', "Ziel Zeit ohne Netzbezug [%]", 50,
+            "Anteil der Zeitschritte (15-min-Intervalle), in denen "
+            "die Gemeinschaft komplett ohne Netzbezug auskommt – "
+            "zeit- statt energiebezogen. Ein anspruchsvolles Ziel, "
+            "da schon geringer Netzbezug ein Intervall als "
+            "'nicht autark' zählt; erfordert meist deutlich "
+            "größere Speicher als der Autarkiegrad.",
+        ),
+    }
+    choice = st.radio(
+        "Optimierungsziel", list(target_options), horizontal=True,
+        help="Welches Ziel soll mit dem Speicher erreicht werden?"
+    )
+    col, slider_label, default, option_help = target_options[choice]
+    st.caption(option_help)
+    targets = {col: st.slider(slider_label, 5, 100, default, 5)
+               / 100.0}
 
     with st.expander("⚙️ Erweiterte Einstellungen"):
         col1, col2 = st.columns(2)
@@ -467,6 +528,45 @@ def _step_targets() -> tuple:
 # Schritt 3 – Ergebnis
 # ---------------------------------------------------------------------------
 
+def _kpi_comparison(baseline, scenario, cap_label: str) -> None:
+    """Render a side-by-side KPI comparison ohne/mit Speicher.
+
+    Lays out one row per KPI in three columns (Kennzahl, Ohne
+    Speicher, Mit Speicher) so the effect of the storage is directly
+    readable.
+
+    Args:
+        baseline: Sweep row at 0 kWh (ohne Speicher).
+        scenario: Sweep row of the storage scenario (mit Speicher).
+        cap_label (str): Human-readable capacity of the scenario.
+    """
+    st.subheader("Kennzahlen im Vergleich")
+    st.caption(
+        f"Verbrauch {_fmt_kwh(baseline['load_kwh'])} · "
+        f"Erzeugung {_fmt_kwh(baseline['generation_kwh'])} "
+        f"– unabhängig vom Speicher"
+    )
+
+    head = st.columns([3, 2, 2], vertical_alignment="bottom")
+    head[0].markdown("**Kennzahl**")
+    head[1].markdown("**Ohne Speicher**")
+    head[2].markdown(f"**Mit Speicher**  \n{cap_label}")
+
+    for label, col, kind, smaller_better in _COMPARE_KPIS:
+        row = st.columns([3, 2, 2], vertical_alignment="center")
+        row[0].markdown(label)
+        row[1].metric(
+            label, _kpi_value(baseline, col, kind),
+            label_visibility="collapsed",
+        )
+        row[2].metric(
+            label, _kpi_value(scenario, col, kind),
+            delta=_kpi_delta(baseline, scenario, col, kind),
+            delta_color='inverse' if smaller_better else 'normal',
+            label_visibility="collapsed",
+        )
+
+
 def _step_result(generation: pd.Series, load: pd.Series,
                  targets: dict, gen_scale: float,
                  capacities: tuple, params: tuple) -> None:
@@ -480,18 +580,9 @@ def _step_result(generation: pd.Series, load: pd.Series,
                           roundtrip_eff)
     baseline = sweep.iloc[0]
 
-    st.subheader("Ausgangslage ohne Speicher")
-    cols = st.columns(4)
-    cols[0].metric("Verbrauch", _fmt_kwh(baseline['load_kwh']))
-    cols[1].metric("Erzeugung",
-                   _fmt_kwh(baseline['generation_kwh']))
-    cols[2].metric("Autarkiegrad", _fmt_pct(baseline['autarky']))
-    cols[3].metric("Eigenverbrauch",
-                   _fmt_pct(baseline['self_consumption']))
-
     if not targets:
         st.info("Bitte in Schritt 2 mindestens ein Ziel "
-                "auswählen.")
+                "auswählen, um eine Speichergröße zu empfehlen.")
         return
 
     best = size_storage(
@@ -502,45 +593,35 @@ def _step_result(generation: pd.Series, load: pd.Series,
     )
 
     if best is None:
-        max_row = sweep.iloc[-1]
+        # Ziele nicht erreichbar → mit dem größten Speicher
+        # vergleichen, damit das Potenzial dennoch sichtbar wird.
+        scenario = sweep.iloc[-1]
+        best_capacity = float('nan')
         st.warning(
             f"Die Ziele sind selbst mit "
-            f"{max_row['capacity_kwh']:.0f} kWh nicht erreichbar "
-            f"(max. Autarkie {_fmt_pct(max_row['autarky'])}, "
+            f"{scenario['capacity_kwh']:.0f} kWh nicht erreichbar "
+            f"(max. Autarkie {_fmt_pct(scenario['autarky'])}, "
             f"max. Eigenverbrauch "
-            f"{_fmt_pct(max_row['self_consumption'])}). "
+            f"{_fmt_pct(scenario['self_consumption'])}). "
             f"Mögliche Hebel: PV-Ausbau erhöhen oder Ziele "
             f"anpassen."
         )
-        best_capacity = float('nan')
+        cap_label = f"größter Speicher · {scenario['capacity_kwh']:.0f} kWh"
     else:
+        scenario = best
         best_capacity = best['capacity_kwh']
-        st.success(f"### Empfohlene Speichergröße: "
-                   f"**{best_capacity:.0f} kWh**")
-        d_autarky = (best['autarky'] - baseline['autarky']) * 100
-        d_self = (best['self_consumption']
-                  - baseline['self_consumption']) * 100
-        cols = st.columns(3)
-        cols[0].metric(
-            "Autarkiegrad", _fmt_pct(best['autarky']),
-            delta=f"+{d_autarky:.1f} %-Pkt.",
-        )
-        cols[1].metric(
-            "Eigenverbrauch", _fmt_pct(best['self_consumption']),
-            delta=f"+{d_self:.1f} %-Pkt.",
-        )
-        cols[2].metric(
-            "Netzbezug",
-            _fmt_kwh(best['grid_import_kwh']),
-            delta=_fmt_kwh(best['grid_import_kwh']
-                           - baseline['grid_import_kwh']),
-            delta_color='inverse',
+
+        st.plotly_chart(
+            _sweep_fig(sweep, targets, best_capacity),
+            use_container_width=True,
         )
 
-    st.plotly_chart(
-        _sweep_fig(sweep, targets, best_capacity),
-        use_container_width=True,
-    )
+        st.success(f"### Empfohlene Speichergröße: "
+                   f"**{best_capacity:.0f} kWh**")
+        cap_label = f"{best_capacity:.0f} kWh"
+
+    _kpi_comparison(baseline, scenario, cap_label)
+
 
     # Zeitreihe des empfohlenen (bzw. größten) Szenarios – einmal
     # simulieren und für Detailgrafik und Download wiederverwenden.
@@ -557,7 +638,9 @@ def _step_result(generation: pd.Series, load: pd.Series,
             _week_fig(result, timestep_hours(load.index)),
             use_container_width=True,
         )
-
+    
+    st.markdown("---")
+    
     st.subheader("Downloads")
     st.caption(
         f"Zeitreihe des empfohlenen Szenarios ({cap:.0f} kWh) sowie "
@@ -596,12 +679,19 @@ def main() -> None:
         "erreichen?"
     )
 
+    st.markdown("---")
+
     generation, load = _step_data()
     if generation is None or load is None:
         return
     _profile_section(generation, load)
 
+    st.markdown("---")
+
     targets, gen_scale, capacities, params = _step_targets()
+
+    st.markdown("---")
+    
     _step_result(generation, load, targets, gen_scale, capacities,
                  params)
 
