@@ -72,3 +72,8 @@ Frühre ein `requirements.txt` file um zu tracken, was du alles für packages
 brauchst.
 
 ---
+
+# weitere ideen
+* Netzdienliches Verhalten simulieren (über Day-Ahead Preis, Netzauslastung oder
+Peak-shavin Vorgaben); Plan liegt in /.claude/
+* Toggle für "Laden aus dem Netz erlauben"
