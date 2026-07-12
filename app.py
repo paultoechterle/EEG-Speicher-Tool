@@ -107,24 +107,23 @@ def _kpi_value(row, col: str, kind: str) -> str:
     return _fmt_pct(row[col]) if kind == 'pct' else _fmt_kwh(row[col])
 
 
-def _kpi_delta(base, scenario, col: str, kind: str) -> str:
-    """Format the change of a KPI as a signed delta string.
+def _kpi_delta(base, scenario, col: str) -> str:
+    """Format the relative change of a KPI as a signed percent string.
 
     Args:
         base: Baseline sweep row (ohne Speicher).
         scenario: Scenario sweep row (mit Speicher).
         col (str): KPI column name.
-        kind (str): ``'pct'`` or ``'kwh'`` (see :func:`_kpi_value`).
 
     Returns:
-        str: Signed delta, e.g. ``+19.5 %-Pkt.`` or ``-40.0 MWh``.
+        str: Signed relative change, e.g. ``+18.5 %``. ``"neu"`` if
+            the baseline is 0 and the scenario value is not, ``"–"``
+            if both are 0 (keine relative Veränderung berechenbar).
     """
-    if kind == 'pct':
-        return f"{(scenario[col] - base[col]) * 100:+.1f} %-Pkt."
-    diff = scenario[col] - base[col]
-    # _fmt_kwh behält das Vorzeichen; Streamlit färbt daraus das
-    # Delta (mit ``inverse`` ist eine Abnahme die Verbesserung).
-    return _fmt_kwh(diff)
+    base_value = base[col]
+    if base_value == 0:
+        return "–" if scenario[col] == 0 else "neu"
+    return f"{(scenario[col] - base_value) / base_value * 100:+.1f} %"
 
 
 def _export_frame(result: pd.DataFrame) -> pd.DataFrame:
@@ -529,11 +528,12 @@ def _step_targets() -> tuple:
 # ---------------------------------------------------------------------------
 
 def _kpi_comparison(baseline, scenario, cap_label: str) -> None:
-    """Render a side-by-side KPI comparison ohne/mit Speicher.
+    """Render a KPI comparison table ohne/mit Speicher.
 
-    Lays out one row per KPI in three columns (Kennzahl, Ohne
-    Speicher, Mit Speicher) so the effect of the storage is directly
-    readable.
+    Nutzt eine echte Tabelle (``st.dataframe``) statt nebeneinander
+    gesetzter ``st.columns``, da Spalten-Layouts auf schmalen
+    (mobilen) Bildschirmen untereinander umbrechen und die
+    Zeilenzuordnung der Kennzahlen verlieren.
 
     Args:
         baseline: Sweep row at 0 kWh (ohne Speicher).
@@ -547,24 +547,26 @@ def _kpi_comparison(baseline, scenario, cap_label: str) -> None:
         f"– unabhängig vom Speicher"
     )
 
-    head = st.columns([3, 2, 2], vertical_alignment="bottom")
-    head[0].markdown("**Kennzahl**")
-    head[1].markdown("**Ohne Speicher**")
-    head[2].markdown(f"**Mit Speicher**  \n{cap_label}")
-
+    col_mit = f"Mit Speicher · {cap_label}"
+    rows = []
     for label, col, kind, smaller_better in _COMPARE_KPIS:
-        row = st.columns([3, 2, 2], vertical_alignment="center")
-        row[0].markdown(label)
-        row[1].metric(
-            label, _kpi_value(baseline, col, kind),
-            label_visibility="collapsed",
-        )
-        row[2].metric(
-            label, _kpi_value(scenario, col, kind),
-            delta=_kpi_delta(baseline, scenario, col, kind),
-            delta_color='inverse' if smaller_better else 'normal',
-            label_visibility="collapsed",
-        )
+        diff = scenario[col] - baseline[col]
+        improved = (diff < 0) if smaller_better else (diff > 0)
+        arrow = "" if diff == 0 else ("🟢" if improved else "🔴")
+        rows.append({
+            "Kennzahl": label,
+            "Ohne Speicher": _kpi_value(baseline, col, kind),
+            col_mit: _kpi_value(scenario, col, kind),
+            "Veränderung": (
+                f"{arrow} {_kpi_delta(baseline, scenario, col)}"
+            ).strip(),
+        })
+
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        use_container_width=True,
+    )
 
 
 def _step_result(generation: pd.Series, load: pd.Series,
@@ -673,6 +675,7 @@ def _step_result(generation: pd.Series, load: pd.Series,
 def main() -> None:
     """Run the linear three-step workflow."""
     st.title("🔋 EEG Speicher-Tool")
+    st.markdown("Version 1.0 – [Paul Töchterle](mailto:paul.toechterle@energieagentur.tirol), @[Energieagentur Tirol](https://www.energieagentur.tirol/)")
     st.markdown(
         "Wie groß muss ein Gemeinschaftsspeicher sein, um Ihre "
         "Ziele bei **Autarkie** und **Eigenverbrauch** zu "
