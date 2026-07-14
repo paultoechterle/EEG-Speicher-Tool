@@ -13,10 +13,12 @@ import io
 import os
 import tempfile
 
+import folium
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from streamlit_folium import st_folium
 
 from core import (StorageParams, simulate_storage, size_storage,
                   storage_sweep, timestep_hours)
@@ -362,6 +364,54 @@ def _week_fig(result: pd.DataFrame, dt_h: float) -> go.Figure:
 # Schritt 1 – Datengrundlage
 # ---------------------------------------------------------------------------
 
+def _location_picker(default_lat: float = 47.4,
+                     default_lon: float = 11.7) -> tuple:
+    """Render a clickable map to pick the PV site coordinates.
+
+    Der zuletzt geklickte Punkt wird im ``st.session_state`` gehalten,
+    damit er den durch den Klick ausgelösten Rerun übersteht.
+
+    Args:
+        default_lat (float, optional): Startwert Breitengrad.
+            Defaults to 47.4.
+        default_lon (float, optional): Startwert Längengrad.
+            Defaults to 11.7.
+
+    Returns:
+        tuple: (lat, lon) des gewählten Standorts.
+    """
+    if 'pv_lat' not in st.session_state:
+        st.session_state['pv_lat'] = default_lat
+        st.session_state['pv_lon'] = default_lon
+    lat = st.session_state['pv_lat']
+    lon = st.session_state['pv_lon']
+
+    fmap = folium.Map(location=[lat, lon], zoom_start=9,
+                      control_scale=True)
+    folium.Marker(
+        [lat, lon], tooltip="PV-Standort",
+        icon=folium.Icon(color='green', icon='bolt', prefix='fa'),
+    ).add_to(fmap)
+
+    st.caption("Auf die Karte klicken, um den PV-Standort zu wählen.")
+    result = st_folium(
+        fmap, height=320, use_container_width=True,
+        returned_objects=['last_clicked'], key='pv_map',
+    )
+
+    clicked = result.get('last_clicked') if result else None
+    if clicked:
+        new_lat = round(clicked['lat'], 4)
+        new_lon = round(clicked['lng'], 4)
+        if (new_lat, new_lon) != (lat, lon):
+            st.session_state['pv_lat'] = new_lat
+            st.session_state['pv_lon'] = new_lon
+            st.rerun()
+
+    st.caption(f"Gewählt: {lat:.4f} °N, {lon:.4f} °O")
+    return lat, lon
+
+
 def _step_data() -> tuple:
     """Render step 1 and return the community profiles.
 
@@ -378,12 +428,9 @@ def _step_data() -> tuple:
     )
 
     if source == "Synthetische Profile":
+        lat, lon = _location_picker()
         col1, col2 = st.columns(2)
         with col1:
-            lat = st.number_input("Breitengrad", 46.0, 49.0, 47.4,
-                                  0.01)
-            lon = st.number_input("Längengrad", 9.0, 17.0, 11.7,
-                                  0.01)
             kwp = st.number_input("PV-Leistung [kWp]", 1.0, 5000.0,
                                   150.0, 10.0)
         with col2:
@@ -521,7 +568,6 @@ def _step_targets() -> tuple:
     capacities = tuple(range(0, int(max_cap) + 1, int(cap_step)))
     params = (c_rate, roundtrip_eff)
     return targets, gen_scale, capacities, params
-
 
 # ---------------------------------------------------------------------------
 # Schritt 3 – Ergebnis
