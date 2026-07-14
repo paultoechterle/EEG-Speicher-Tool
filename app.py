@@ -383,10 +383,16 @@ def _location_picker(default_lat: float = 47.4,
     if 'pv_lat' not in st.session_state:
         st.session_state['pv_lat'] = default_lat
         st.session_state['pv_lon'] = default_lon
+        st.session_state['pv_zoom'] = 9
+        st.session_state['pv_center'] = [default_lat, default_lon]
     lat = st.session_state['pv_lat']
     lon = st.session_state['pv_lon']
 
-    fmap = folium.Map(location=[lat, lon], zoom_start=9,
+    # Kartenansicht (Zentrum/Zoom) aus dem letzten Zustand
+    # wiederherstellen, damit der Rerun nach dem Klick nicht auf die
+    # Default-Ansicht zurückspringt.
+    fmap = folium.Map(location=st.session_state['pv_center'],
+                      zoom_start=st.session_state['pv_zoom'],
                       control_scale=True)
     folium.Marker(
         [lat, lon], tooltip="PV-Standort",
@@ -396,8 +402,18 @@ def _location_picker(default_lat: float = 47.4,
     st.caption("Auf die Karte klicken, um den PV-Standort zu wählen.")
     result = st_folium(
         fmap, height=320, use_container_width=True,
-        returned_objects=['last_clicked'], key='pv_map',
+        returned_objects=['last_clicked', 'zoom', 'center'],
+        key='pv_map',
     )
+
+    # Aktuelle Ansicht merken, bevor ein Klick den Rerun auslöst.
+    if result:
+        if result.get('zoom') is not None:
+            st.session_state['pv_zoom'] = result['zoom']
+        center = result.get('center')
+        if center:
+            st.session_state['pv_center'] = [center['lat'],
+                                             center['lng']]
 
     clicked = result.get('last_clicked') if result else None
     if clicked:
